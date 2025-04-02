@@ -1,5 +1,9 @@
-#!/bin/bash
-#
+#!/bin/sh
+
+# Allow non-POSIX-standard "local" keyword. It's relatively easy to convert the script in the future if necessary.
+# shellcheck disable=SC3043
+
+# READ AND UNDERSTAND
 # This script disables google-authenticator 2fa authentication by:
 #   
 # 1. Writing to: /etc/ssh/sshd_config.d/tmp_disabled_2fa_for_[USERNAME].conf
@@ -10,8 +14,11 @@
 # 2. Renaming: /home/[USERNAME]/.google_authenticator
 #    To:       /home/[USERNAME]/.google_authenticator_tmp_disabled
 #
-# It then reenables 2fa by reverting these changes.
+# 3. Validates and restarts the SSHD service
 #
+# 4. Reverts these changes
+#
+# 5. Validates and restarts the SSHD service
 
 # These are resolved and validated in main()
 username=
@@ -19,43 +26,71 @@ ip_addr=
 ga_path=
 sshd_conf_path=
 
-# Options
+## Script options
 window=10
 
-# So we can restore the changes on SIGINT/CTRL_C
+#---
+## DESC: Set to 1 if the user has pressed ctrl+c
+#---
 script_aborted=0
 
-# trap ctrl-c and call ctrl_c()
-trap ctrl_c INT
-
-# shellcheck disable=SC2317
-function ctrl_c() {
+#---
+## DESC: Trap for ctrl+c
+#---
+trap ctrl_c INT; ctrl_c() {
     script_aborted=1
 }
 
-# Broadcasts a message to the user on all ttys
-function broadcast () {
+#---
+## DESC: Helper functions for formatting text
+#---
+ansi()      { printf "\e[%sm%s\e[0m" "$1" "$(echo "$@" | cut -d' ' -f2-)"; }
+reset()     { ansi 0 "$@"; }
+dim()       { ansi 2 "$@"; }
+italic()    { ansi 3 "$@"; }
+underline() { ansi 4 "$@"; }
+red()       { ansi 31 "$@"; }
+yel()       { ansi 33 "$@"; }
+mag()       { ansi 35 "$@"; }
+cyan()      { ansi 36 "$@"; }
+green()     { ansi 92 "$@"; }
+
+#---
+## DESC: Broadcasts a message to the user on all ttys
+## ARGS: $1 (required) Message
+#---
+broadcast () {
     find /dev/pts -mindepth 1 -maxdepth 1 -type c -user "$username" -print | while read -r tty; do
-        echo -e "$@" | write "$username" "$tty"
+        printf "%s" "$@" | write "$username" "$tty"
     done
 }
 
-function try () {
-    echo -en "\e[33m$1\e[0m \e[3m$2\e[0m: \e[91m"
-}
+#---
+## DESC: A simple helper function for printing formatted and more descriptive actions to tty.
+## ARGS: $1 (required) Type of action (restarting, deleting, flipping etc)
+##       $2 (required) Target of action
+## EXAM:
+##  try Restarting SSHD # Restarting SSHD:
+##  catch 0 # OK
+##  catch 1 # ?
+#---
+try () {
+    printf "%s %s\e[91m " "$(yel "$1")" "$(italic "$2:")"
+}; catch () {
+    printf "%s" "$(reset "")"
 
-function catch () {
-    echo -en "\e[0m"
-
-    if (( $1==0 )) then
-        echo -e "\e[92mOK\e[0m "
+    if [ "$1" -eq 0 ]; then
+        printf "%s\n" "$(green OK)"
     fi
 }
 
-# Disables .google_authenticator
-function ga_path_disable {
+#---
+## DESC: Disables .google_authenticator
+## OUTS: 0 if we could disable the ga config (will return > 0 if it already is disabled)
+#---
+ga_path_disable () {
     local code=
-    local ga_from=$ga_path
+    local ga_from="$ga_path"
     local ga_dest="${ga_path}_tmp_disabled"
 
     try "Suffixing " "$ga_from"
@@ -65,11 +100,14 @@ function ga_path_disable {
     return $code
 }
 
-# Restores .google_authenticator
-function ga_path_restore {
+#---
+## DESC: Restores .google_authenticator
+## OUTS: 0 if we could restore the ga config (will return > 0 if it weren't disabled to begin with)
+#---
+ga_path_restore () {
     local code=
     local ga_from="${ga_path}_tmp_disabled"
-    local ga_dest=$ga_path
+    local ga_dest="$ga_path"
 
     try "Restoring " "$ga_from"
     mv "$ga_from" "$ga_dest"
@@ -78,8 +116,11 @@ function ga_path_restore {
     return $code
 }
 
-# Writing the sshd configuration
-function sshd_conf_create {
+#---
+## DESC: Writes the temporary sshd configuration
+## OUTS: 0 if the file could be written
+#---
+sshd_conf_create () {
     local code=
     try "Creating  " "$sshd_conf_path"
     cat >"$sshd_conf_path" <<EOL
@@ -92,8 +133,12 @@ EOL
     return $code
 }
 
-# Restores the sshd configuration
-function sshd_conf_restore {
+
+#---
+## DESC: Restores the sshd configuration
+## OUTS: 0 if we could restore the sshd config (will return > 0 if it weren't disabled to begin with)
+#---
+sshd_conf_restore () {
     local code=
     try "Restoring " "$sshd_conf_path"
     rm "$sshd_conf_path"
@@ -102,8 +147,11 @@ function sshd_conf_restore {
     return $code
 }
 
-# Reloades the sshd configuration
-function sshd_conf_reload () {
+#---
+## DESC: Reloades the sshd configuration
+## OUTS: 0 if the sshd service could successfully restarted.
+#---
+sshd_conf_reload () {
     local code=
     
     try "Validating" "/etc/ssh/sshd_config"
@@ -121,20 +169,31 @@ function sshd_conf_reload () {
     return $code
 }
 
-function is_disabled () {
+#---
+## DESC: Check if 2fa has been disabled for current user
+## OUTS: 1 if account is disabled
+#---
+is_disabled () {
     local ga_from="${ga_path}_tmp_disabled"
 
-    if [ ! -f "$sshd_conf_path" ] && [ ! -f "$ga_from" ]; then
+    # Check if any temporary files exists
+    if [ ! -f "$sshd_conf_path" ] || [ ! -f "$ga_from" ]; then
         return 1
     fi
+    
+    return 0
 }
 
-function restore_2fa () {
+#---
+## DESC: Restores 2fa
+## OUTS: 0 if everything went OK (could restore)
+#---
+restore_2fa () {
     echo ""
-    echo "Restoring 2fa for user $username ..."
+    printf "%s\n" "$(cyan Restoring 2fa for user "$username" ...)"
 
     if ! is_disabled; then 
-        echo -e "\e[91mError: \033[K\e[0m2FA hasn't been deactivated for this account."
+        printf "%s 2FA hasn't been deactivated for this account.\n" "$(red Error: )"
         exit 1
     fi
 
@@ -152,7 +211,7 @@ function restore_2fa () {
         hasErrors=1
     fi
 
-    if (( hasErrors )) || is_disabled; then
+    if [ ${hasErrors} -eq 1 ] || is_disabled; then
         broadcast \
             " WARNING: Something went wrong while restoring 2FA for your account.\n"\
             "Make sure you can still connect to the server before closing this connection."
@@ -163,13 +222,17 @@ function restore_2fa () {
     return $hasErrors
 }
 
-function disable_2fa () {
+#---
+## DESC: Disables 2fa
+## OUTS: 0 if everything went OK (could disable)
+#---
+disable_2fa () {
     local emerg_restore
 
     echo ""
-    echo "Disabling 2fa for user $username ..."
+    printf "%s\n" "$(cyan Disabling 2fa for user "$username" ...)"
 
-    emerg_restore=$(at now + 1 minutes 2>&1 <<< "./test --disable=${username}" | grep -Eo "^job [0-9]+" | cut -c 5-)
+    emerg_restore=$(printf "./test --disable=%s" "$username" | at now + 1 minutes 2>&1 | grep -Eo "^job [0-9]+" | cut -c 5-)
 
     echo "Scheduled emergency restoration of sshd configuration with job id $emerg_restore at now + 1 minutes. "
 
@@ -192,62 +255,73 @@ function disable_2fa () {
     broadcast "Two-Factor Authentication (2FA) has been temporarily disabled for your account."
 
     if start_countdown; then
-        echo -e "\n\e[92mScript exited successfully\e[0m "
+        printf "\n\e[92mScript exited successfully\e[0m\n"
         
         at -r "$emerg_restore" 2>&1
     else
-        echo -e "\e[91mAn unhandled exception has occurred. Wait for the \e[0m"
+        printf "\e[91mAn unhandled exception has occurred. Wait for the \e[0m\n"
     fi
 }
 
-function start_countdown () {
+#---
+## DESC: Temporarily disables 2fa
+## OUTS: 0 if everything went OK (could disable, could restore)
+#---
+start_countdown () {
     local file=/var/log/auth.log
     local pattern="^.*logind\[[0-9]+\]: New session [0-9]+ of user ${username}\.$"
     local line_count
     local time_stop
     local time_left
-    local prefix="\rWaiting for $username to connect..."
+    local prefix="Waiting for $username to connect..."
+    local grepRes
 
     line_count="$(wc -l $file | awk '{ print $1}')"
 
     time_stop=$(($(date +%s)+window))
 
-    local success=0
+    stty -echo # disable user input
 
     while true; do
         time_left=$((time_stop-$(date +%s)))
         
-        echo -en "$prefix $time_left\033[K"
+        printf "%s\033[K\033[0K\r" "$prefix $time_left"
 
         # Check for connection from user
-        success=!$(tail -n "+$line_count" "$file" | grep -qE "$pattern")$?
-
-        if (( success )); then
-            echo -e "$prefix \e[92muser $username connected 👍\033[K\e[0m"
+        tail -n "+$line_count" "$file" | grep -qE "$pattern"
+        grepRes=$?
+        
+        if [ $grepRes -eq 0 ]; then
+            printf "%s \e[92muser %s connected 👍\033[K\e[0m\n" "$prefix" "$username"
             break
         fi
 
-        if (( time_left < 1 )); then
-            echo -e "$prefix \e[91mtime ran out\033[K\e[0m"
+        if [ "$time_left" -lt 1 ]; then
+            printf "%s \e[91mtime ran out\033[K\e[0m\n" "$prefix"
             break
         fi
 
-        if (( script_aborted )); then
-            echo -e "$prefix \e[91maborted\033[K\e[0m"
+        if [ "$script_aborted" -ne 0 ]; then
+            printf "%s \e[91maborted\033[K\e[0m\n" "$prefix"
             break
         fi
         
         sleep 1
     done
+
+    stty echo # enable user input
     
     restore_2fa
 }
 
-
-function print_args_help () {
+#---
+## DESC: Prints --help
+## ARGS: $1 (optional) Error message
+#---
+print_args_help () {
     if [ "$1" ]; then
-        echo -e >&2 "\e[91mError:\033[K\e[0m"
-        echo -e "  $*"
+        printf >&2 "\e[91mError:\033[K\e[0m\n"
+        printf "  %s\n" "$*"
         echo ""
     fi
 
@@ -281,59 +355,75 @@ EOF
     fi
 }
 
-function args_verify-not-empty () {
-    local value="$1"
-    local varname="$2"
+#---
+## DESC: Prints resolved script arguments
+#---
+print_args () {
+    printf "username%s %s\n"       "$(dim .........)"     "$username"
+    printf "ip_addr%s %s\n"        "$(dim ..........)"    "$ip_addr"
+    printf "ga_path%s %s\n"        "$(dim ..........)"    "$ga_path"
+    printf "sshd_conf_path%s %s\n" "$(dim ...)"           "$sshd_conf_path"
+    printf "mode%s %s\n"           "$(dim .............)" "$mode"
+}
 
-    if [ "$value" ]; then
-        echo "$value"
-    elif [ "$varname" ]; then
-        print_args_help "$varname cannot handle an empty argument"
-        exit 1
-    else
-        print_args_help \
-            "The programmer forgot to include context, something was empty which shouldn't have been, but I can't tell you much more than that. Sorry :("
-        exit 1
+#---
+## DESC: Checks if given package is installed
+## ARGS: $1 (required) package name
+## OUTS: 0 if package is installed
+#---
+has_package () {
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -cq "ok installed"
+}
+
+#---
+## DESC: Assert that given package is installed. If not, exit script and display --help.
+## ARGS: $1 (required) Package name
+##       $2 (required) Link to manpage
+#---
+assert_package () {
+    local package_name="$1"
+    local package_link="$2"
+
+    if ! has_package "$package_name"; then
+        print_args_help "This script requires package '$package_name' to be installed ($package_link)"
     fi
 }
 
-function print_args () {
-    echo -e "username\e[2m.........\e[0m $username"
-    echo -e "ip_addr\e[2m..........\e[0m $ip_addr"
-    echo -e "ga_path\e[2m..........\e[0m $ga_path"
-    echo -e "sshd_conf_path\e[2m...\e[0m $sshd_conf_path"
-    echo -e "mode\e[2m.............\e[0m $mode"
-}
-
-function has_package () {
-    dpkg-query -W -f='${Status}' $1 2>/dev/null | grep -cq "ok installed"
-}
-
-function main () {
-    local mode="unknown"
+#---
+## DESC: 
+##  Script entrypoint.
+##  Parses the arguments, check requirements (running as root / env) and executes the currect subflow. 
+## ARGS: $1 (required) Value
+#---
+main () {
+    local mode=
+    local continue=0
 
     local opt_user=
     local opt_addr=
     local opt_dry=0
+    local opt_no_interaction=0
 
-    if [[ $(/usr/bin/id -u) -ne 0 ]]; then
+    if [ "$(id -u)" -ne 0 ]; then
         print_args_help "This script must be run as root"
     fi
 
-    if ! has_package "at"; then
-        print_args_help \
-        "This script requires package 'at\n" \
-        " https://manpages.debian.org/testing/at/at.1.en.html"
-    fi
+    assert_package at https://manpages.debian.org/bookworm/at/at.1.en.html
+    assert_package libpam-google-authenticator https://manpages.debian.org/bookworm/libpam-google-authenticator/pam_google_authenticator.8.en.html
 
-    if ! has_package "libpam-google-authenticator"; then
-        print_args_help \
-        "This script requires package 'libpam-google-authenticator' to be installed\n" \
-        " https://manpages.debian.org/testing/libpam-google-authenticator/pam_google_authenticator.8.en.html"
-    fi
+    args_assert_noempty () {
+        local value="$1"
+        local varname="$2"
 
-    while [ "$1" ]
-    do
+        if [ "$value" ]; then
+            echo "$value"
+        else [ "$varname" ]
+            print_args_help "$varname may not be empty"
+            exit 1
+        fi
+    }
+
+    while test $# -gt 0; do
         case "$1" in
             '-h' | '--help')
                 print_args_help
@@ -343,36 +433,46 @@ function main () {
             '-u' | '--unsecure')
                 shift
                 mode=disable
-                opt_user=$1
-                shift
+                opt_user=$(args_assert_noempty "$1" disable)
+                shift $(( $# > 0 ? 1 : 0 ))
                 ;;
+
             '-r' | '--restore')
                 shift
                 mode=restore
-                opt_user=$1
-                shift
+                opt_user=$(args_assert_noempty "$1" restore)
+                shift $(( $# > 0 ? 1 : 0 ))
                 ;;
+
             '-a' | '--addr')
                 shift
-                opt_addr=$(args_verify-not-empty "$1" addr)
-                shift
+                opt_addr=$(args_assert_noempty "$1" addr)
+                shift $(( $# > 0 ? 1 : 0 ))
                 ;;
+
             '-d' | '--dry')
-                shift
                 opt_dry=1
-                shift
+                shift $(( $# > 0 ? 1 : 0 ))
                 ;;
+
+            '-ni' | '--no-interaction')
+                opt_no_interaction=1
+                shift $(( $# > 0 ? 1 : 0 ))
+                ;;
+
             *)
                 print_args_help "Unrecognized argument: $1"
                 exit 1
         esac
     done
 
+    # Use supplied args or fall back on defaults
     username="${opt_user:-$SUDO_USER}"
     ip_addr="${opt_addr:-$(echo "$SSH_CLIENT" | awk '{ print $1}')}"
     ga_path="/home/${username}/.google_authenticator"
     sshd_conf_path=/etc/ssh/sshd_config.d/tmp_disabled_2fa_for_${username}.conf
 
+    # Check that we got a username and that the user exists
     if [ -z "${username}" ]; then
         print_args_help "Could not resolve username"
     else
@@ -381,27 +481,76 @@ function main () {
         fi
     fi
 
+    # Check that we got an address
     if [ -z "${ip_addr}" ]; then
         print_args_help "Could not resolve ip address of this connection. Have you "
     fi
 
-    if [ ! "$mode" == "restore" ] && [ ! "$mode" == "disable" ]; then
+    # Check that we got an operation we understand
+    if [ ! "$mode" = "restore" ] && [ ! "$mode" = "disable" ]; then
         print_args_help "Invalid mode \"$mode\". Mode can only be \"restore\" or \"enable\""
     fi
     
-    echo Script starting
-    print_args
+    if [ $opt_no_interaction -eq 1 ]; then
+        continue=yes    
+    else
+        echo "$(red READ AND UNDERSTAND) "
+        echo "This script temporarily disables 2FA authentication for the specified account by:"
+        echo ""
+        echo "1. Creating file: $(italic /etc/ssh/sshd_config.d/tmp_disabled_2fa_for_"$username".conf)"
+        echo "      $(dim "$(italic Match User "$username" Address "$ip_addr")")"
+        echo "         $(dim "$(italic  PasswordAuthentication yes)")"
+        echo "         $(dim "$(italic  AuthenticationMethods password)")"
+        echo "2. Renaming: $(italic /home/"$username"/.google_authenticator)"
+        echo "   To:       $(italic /home/"$username"/.google_authenticator"$(yel _tmp_disabled)")"
+        echo "3. Restarts service SSHD*"
+        echo "4. Restores these changes after $(yel 60) seconds"
+        echo "5. Restarts service SSHD*"
+        echo
+        echo "* $(italic If the configuration passed validation \(sshd -t\)) "
+        echo
 
-    if (( opt_dry )); then
-        echo -e "\n--dry goodbye"
-        exit 0
-    fi
+        echo "$(cyan IT SHOULD:) "
+        echo "1. Not effect other users"
+        echo "2. Restore all changes if anything goes wrong"
+        echo "3. Work :)"
+        echo
 
-    if [ "$mode" == "restore" ]; then
-        restore_2fa
-    elif [ "$mode" == "disable" ]; then
-        disable_2fa
-    fi
+        echo "$(cyan YOU SHOULD:) "
+        echo "1. Not close this terminal before verifying that you can open a new connection"
+        echo "2. Have a plan of what do in the unlikely event that you do get locked out from ssh:ing into this machine"
+        echo "3. Have knowledge of how to manually fix things if anything in the description above did screw things up"
+        echo
+        echo "You can disable this warning by passing option $(italic -no-interaction)"
+
+        printf "\n"
+
+        printf "Do you understand and want to continue (y/yes)?: " >&2
+        read -r continue
+        printf "\n"
+    fi;
+
+    case $continue in
+        y|Y|yes)
+            printf "Arguments\n"
+            print_args
+        
+            if [ $opt_dry -eq 1 ]; then
+                printf "\n--dry goodbye\n"
+                exit 0
+            fi
+
+            if [ "$mode" = "restore" ]; then
+                restore_2fa
+            elif [ "$mode" = "disable" ]; then
+                disable_2fa
+            fi
+        ;;
+        
+        *)
+            echo 'Coward'
+        ;;
+    esac
 }
 
 main "$@"
