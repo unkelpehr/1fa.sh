@@ -3,23 +3,6 @@
 # Allow non-POSIX-standard "local" keyword. It's relatively easy to convert the script in the future if necessary.
 # shellcheck disable=SC3043
 
-# READ AND UNDERSTAND
-# This script disables google-authenticator 2fa authentication by:
-#   
-# 1. Writing to: /etc/ssh/sshd_config.d/tmp_disabled_2fa_for_[USERNAME].conf
-#    Match User [USERNAME] Address [USER_IP_ADDR]
-#        PasswordAuthentication yes
-#        AuthenticationMethods password
-#
-# 2. Renaming: /home/[USERNAME]/.google_authenticator
-#    To:       /home/[USERNAME]/.google_authenticator_tmp_disabled
-#
-# 3. Validates and restarts the SSHD service
-#
-# 4. Reverts these changes
-#
-# 5. Validates and restarts the SSHD service
-
 # These are resolved and validated in main()
 username=
 ip_addr=
@@ -27,10 +10,14 @@ ga_path=
 sshd_conf_path=
 
 ## Script options
-window=10
+window=30
+
+# Number of minutes before the emergency 'at' job will restore the changes.
+# 'at' jobs are persistent across reboots.
+at_countdown=2 
 
 #---
-## DESC: Set to 1 if the user has pressed ctrl+c
+## DESC: Set to 1 if the user has pressed ctrl+c. Used when we're waiting for the user to connect.
 #---
 script_aborted=0
 
@@ -46,6 +33,7 @@ trap ctrl_c INT; ctrl_c() {
 #---
 ansi()      { printf "\e[%sm%s\e[0m" "$1" "$(echo "$@" | cut -d' ' -f2-)"; }
 reset()     { ansi 0 "$@"; }
+bold()      { ansi 1 "$@"; }
 dim()       { ansi 2 "$@"; }
 italic()    { ansi 3 "$@"; }
 underline() { ansi 4 "$@"; }
@@ -61,7 +49,7 @@ green()     { ansi 92 "$@"; }
 #---
 broadcast () {
     find /dev/pts -mindepth 1 -maxdepth 1 -type c -user "$username" -print | while read -r tty; do
-        printf "%s" "$@" | write "$username" "$tty"
+        echo "$@" | write "$username" "$tty"
     done
 }
 
@@ -79,9 +67,22 @@ try () {
 }; catch () {
     printf "%s" "$(reset "")"
 
-    if [ "$1" -eq 0 ]; then
+    if re "$1" "^[0-9]+$" && [ "$1" -eq 0 ]; then
         printf "%s\n" "$(green OK)"
+    elif [ -z "$1" ]; then
+        printf "%s\n" "$(green OK)"
+    else
+        printf "%s\n" "$(red "${1:-"ERROR"}")"
     fi
+}
+
+#---
+## DESC: Helper function for regex matching
+## ARGS: $1 string to match against
+##       $2 pattern
+#---
+re () {
+    echo "$1" | grep -Eq "$2"
 }
 
 #---
@@ -222,19 +223,35 @@ restore_2fa () {
     return $hasErrors
 }
 
+# BUGG!!!! clear; sudo -E ./1fa.sh -r
+
 #---
 ## DESC: Disables 2fa
 ## OUTS: 0 if everything went OK (could disable)
 #---
 disable_2fa () {
-    local emerg_restore
+    local at
+    local job
+    local job_id
 
-    echo ""
+    echo
     printf "%s\n" "$(cyan Disabling 2fa for user "$username" ...)"
 
-    emerg_restore=$(printf "./test --disable=%s" "$username" | at now + 1 minutes 2>&1 | grep -Eo "^job [0-9]+" | cut -c 5-)
+    at=$(printf "./test --disable=%s" "$username" | at now + $at_countdown minutes 2>&1)
+    job=$(echo "$at" | grep -E "^job ")
+    job_id=$(echo "$job" | grep -Eo "^job [0-9]+" | cut -c 5-)
 
-    echo "Scheduled emergency restoration of sshd configuration with job id $emerg_restore at now + 1 minutes. "
+    try "Scheduling" "$job"
+
+    if re "$job_id" "^[0-9]+$"; then
+        catch 0
+    else
+        catch 1
+
+        printf "\nCould not schedule the just-in-case restoration job. No changes has been made. \`at\` output:\n"
+        printf "%s\n" "$at"
+        exit 1
+    fi
 
     if ! ga_path_disable; then
         ga_path_restore
@@ -255,9 +272,21 @@ disable_2fa () {
     broadcast "Two-Factor Authentication (2FA) has been temporarily disabled for your account."
 
     if start_countdown; then
-        printf "\n\e[92mScript exited successfully\e[0m\n"
+        try "Deschedule" "$job"
+        at=$(at -r "2" 2>&1)
+
+        if [ -n "$at" ]; then
+            catch "$at"
+            
+            printf "\n%s\n" "$(red Could not remove scheduled JIC-job.) We could however restore all changes so it shouldn't matter."
+            printf "%s\n" "But the scheduled job is a lifeline that should work if something unexpected happens, e.g. a reboot during script execution."
+        else
+            catch 0
+            
+            printf "\n%s\n" "Script exited $(italic successfully)"
+        fi
+
         
-        at -r "$emerg_restore" 2>&1
     else
         printf "\e[91mAn unhandled exception has occurred. Wait for the \e[0m\n"
     fi
@@ -333,10 +362,11 @@ Temporarily disables two-factor authenticator (2FA) for given account.
 
 Options:
     -h, --help               Prints this message
-    -u, --unsecure  <user>   Disables 2FA for given user
+    -d, --disable   <user>   Disables 2FA for given user
     -r, --restore   <user>   Enables (restores) 2FA for given user
     -a, --addr      <cidr>   CIDR address/masklen format
     -d, --dry                Prints the resolved arguments and exits script
+    -ni, --no-interaction    Disables the warning prompt
     
 Examples:
     $0 -u       # Disables 2FA for the current user and the current SSH client IP
@@ -389,6 +419,7 @@ assert_package () {
     fi
 }
 
+
 #---
 ## DESC: 
 ##  Script entrypoint.
@@ -411,58 +442,57 @@ main () {
     assert_package at https://manpages.debian.org/bookworm/at/at.1.en.html
     assert_package libpam-google-authenticator https://manpages.debian.org/bookworm/libpam-google-authenticator/pam_google_authenticator.8.en.html
 
-    args_assert_noempty () {
-        local value="$1"
-        local varname="$2"
-
-        if [ "$value" ]; then
-            echo "$value"
-        else [ "$varname" ]
-            print_args_help "$varname may not be empty"
-            exit 1
-        fi
-    }
-
+    # Resolve arguments
     while test $# -gt 0; do
         case "$1" in
             '-h' | '--help')
                 print_args_help
-                exit 0
                 ;;
 
-            '-u' | '--unsecure')
-                shift
-                mode=disable
-                opt_user=$(args_assert_noempty "$1" disable)
-                shift $(( $# > 0 ? 1 : 0 ))
-                ;;
+            '-d' | '--disable' | '-r' | '--restore')
+                if [ -n "$mode" ]; then
+                    print_args_help "You have already opted for a mode."
+                fi
 
-            '-r' | '--restore')
+                if re "$1" "^(-d|--di)+.*"; then
+                    mode=disable
+                else
+                    mode=restore
+                fi
+
                 shift
-                mode=restore
-                opt_user=$(args_assert_noempty "$1" restore)
-                shift $(( $# > 0 ? 1 : 0 ))
+
+                # handle optional value (i.e. ./1fa.sh -d -a 192.168.1.54)
+                if [ "$(printf '%c' "$1")" != '-' ]; then
+                    opt_user=$1
+                    shift
+                fi
                 ;;
 
             '-a' | '--addr')
                 shift
-                opt_addr=$(args_assert_noempty "$1" addr)
-                shift $(( $# > 0 ? 1 : 0 ))
+
+                if [ -z "$1" ]; then
+                    print_args_help "Address may not be empty"
+                fi
+                
+                opt_addr="$1"
+
+                shift
                 ;;
 
-            '-d' | '--dry')
+            '-öö' | '--dry')
                 opt_dry=1
-                shift $(( $# > 0 ? 1 : 0 ))
+                shift
                 ;;
 
             '-ni' | '--no-interaction')
                 opt_no_interaction=1
-                shift $(( $# > 0 ? 1 : 0 ))
+                shift
                 ;;
 
             *)
                 print_args_help "Unrecognized argument: $1"
-                exit 1
         esac
     done
 
@@ -504,10 +534,11 @@ main () {
         echo "2. Renaming: $(italic /home/"$username"/.google_authenticator)"
         echo "   To:       $(italic /home/"$username"/.google_authenticator"$(yel _tmp_disabled)")"
         echo "3. Restarts service SSHD*"
-        echo "4. Restores these changes after $(yel 60) seconds"
+        echo "4. Restores these changes after $(yel $window) seconds**"
         echo "5. Restarts service SSHD*"
         echo
-        echo "* $(italic If the configuration passed validation \(sshd -t\)) "
+        echo "* $(italic if the configuration passed validation \(sshd -t\)) "
+        echo "** $(italic or immediately on successful connection from "$username", whatever comes first) "
         echo
 
         echo "$(cyan IT SHOULD:) "
@@ -521,18 +552,17 @@ main () {
         echo "2. Have a plan of what do in the unlikely event that you do get locked out from ssh:ing into this machine"
         echo "3. Have knowledge of how to manually fix things if anything in the description above did screw things up"
         echo
-        echo "You can disable this warning by passing option $(italic -no-interaction)"
-
-        printf "\n"
+        echo "You can disable this warning by passing option $(italic --ni, -no-interaction)"
+        echo
 
         printf "Do you understand and want to continue (y/yes)?: " >&2
         read -r continue
-        printf "\n"
+        echo
     fi;
 
     case $continue in
         y|Y|yes)
-            printf "Arguments\n"
+            echo "$(cyan Arguments:) "
             print_args
         
             if [ $opt_dry -eq 1 ]; then
@@ -548,7 +578,7 @@ main () {
         ;;
         
         *)
-            echo 'Coward'
+            echo 'Script exited'
         ;;
     esac
 }
