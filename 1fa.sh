@@ -223,8 +223,6 @@ restore_2fa () {
     return $hasErrors
 }
 
-# BUGG!!!! clear; sudo -E ./1fa.sh -r
-
 #---
 ## DESC: Disables 2fa
 ## OUTS: 0 if everything went OK (could disable)
@@ -273,7 +271,7 @@ disable_2fa () {
 
     if start_countdown; then
         try "Deschedule" "$job"
-        at=$(at -r "2" 2>&1)
+        at=$(at -r "$job_id" 2>&1)
 
         if [ -n "$at" ]; then
             catch "$at"
