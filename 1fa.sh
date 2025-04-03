@@ -8,13 +8,15 @@ username=
 ip_addr=
 ga_path=
 sshd_conf_path=
-
-## Script options
 window=30
 
 # Number of minutes before the emergency 'at' job will restore the changes.
 # 'at' jobs are persistent across reboots.
-at_countdown=2 
+at_countdown=2
+at_disabled=0
+
+# Set to 1 to permanently disable the warning prompt
+disable_prompt=0
 
 #---
 ## DESC: Set to 1 if the user has pressed ctrl+c. Used when we're waiting for the user to connect.
@@ -354,24 +356,30 @@ print_args_help () {
 
     cat >&2 <<EOF
 Usage:
-    $0 [-h] [-u <user> -a <ip>] [-r <user>] [-d]
+    $0 [(-d | -r) <user=current>] [-a <addr=current>] [-w <seconds>]
 
 Temporarily disables two-factor authenticator (2FA) for given account.
 
 Options:
     -h, --help               Prints this message
-    -d, --disable   <user>   Disables 2FA for given user
-    -r, --restore   <user>   Enables (restores) 2FA for given user
-    -a, --addr      <cidr>   CIDR address/masklen format
-    -d, --dry                Prints the resolved arguments and exits script
+    -d, --disable   <user>   Disables 2FA for given user (default: the user who invoked sudo)
+    -r, --restore   <user>   Enables (restores) 2FA for given user (default: the user who invoked sudo)
+    -a, --addr      <cidr>   CIDR address/masklen format *
+    -w, --window    <secs>   Number of seconds before enabling 2FA again (default: $window)
+    -x, --dry                Prints the resolved arguments and exits script
     -ni, --no-interaction    Disables the warning prompt
-    
-Examples:
-    $0 -u       # Disables 2FA for the current user and the current SSH client IP
-    $0 -r bobby # Restores any changes made for bobbys account
 
-    $0 -u bobby -a 10.1.1.4     # Let bobby connect from specific IP
-    $0 -u bobby -a 10.1.1.0/24  # Let bobby connect from specific subnet
+* The default address used is the one set in the environmental variable \$SSH_CLIENT
+* SSHD allows many combinations of address; comma-separated, patterns (e.g. 10.*.1.*), !exclusions etc
+
+Examples:
+    $0 -u       # Allow the user who invoked sudo to bypass 2FA when connecting from \$SSH_CLIENT
+
+    $0 -u bobby                 # Allow bobby to bypass 2FA when connecting the current user' ip
+    $0 -u bobby -a 10.1.1.4     # Let bobby bypass 2FA from specific IP
+    $0 -u bobby -a 10.1.1.0/24  # Let bobby bypass 2FA from specific subnet
+    $0 -u bobby -a *            # Let bobby bypass 2FA from any inbound address
+    $0 -r bobby                 # Manually restores any changes made for bobbys account
 EOF
 
     if [ "$1" ]; then
@@ -431,14 +439,9 @@ main () {
     local opt_user=
     local opt_addr=
     local opt_dry=0
-    local opt_no_interaction=0
-
-    if [ "$(id -u)" -ne 0 ]; then
-        print_args_help "This script must be run as root"
-    fi
-
-    assert_package at https://manpages.debian.org/bookworm/at/at.1.en.html
-    assert_package libpam-google-authenticator https://manpages.debian.org/bookworm/libpam-google-authenticator/pam_google_authenticator.8.en.html
+    local opt_window=
+    local opt_no_interaction=$disable_prompt
+    local opt_no_schedule=0
 
     # Resolve arguments
     while test $# -gt 0; do
@@ -479,7 +482,23 @@ main () {
                 shift
                 ;;
 
-            '-öö' | '--dry')
+            '-w' | '--window')
+                shift
+
+                if [ -z "$1" ]; then
+                    print_args_help "Window may not be empty"
+                fi
+                
+                if ! re "$1" "^[0-9]+$"; then
+                    print_args_help "Window requires a value of seconds, hence must only consist of numbers"
+                fi
+
+                opt_window="$1"
+
+                shift
+                ;;
+
+            '-x' | '--dry')
                 opt_dry=1
                 shift
                 ;;
@@ -489,16 +508,30 @@ main () {
                 shift
                 ;;
 
+            '-ns' | '--no-scheduled')
+                opt_no_schedule=1
+                shift
+                ;;
+                
             *)
                 print_args_help "Unrecognized argument: $1"
         esac
     done
 
+    if [ "$(id -u)" -ne 0 ]; then
+        print_args_help "This script must be run as root"
+    fi
+
+    assert_package at https://manpages.debian.org/bookworm/at/at.1.en.html
+    assert_package libpam-google-authenticator https://manpages.debian.org/bookworm/libpam-google-authenticator/pam_google_authenticator.8.en.html
+
     # Use supplied args or fall back on defaults
     username="${opt_user:-$SUDO_USER}"
     ip_addr="${opt_addr:-$(echo "$SSH_CLIENT" | awk '{ print $1}')}"
     ga_path="/home/${username}/.google_authenticator"
+    window="${opt_window:-"$window"}"
     sshd_conf_path=/etc/ssh/sshd_config.d/tmp_disabled_2fa_for_${username}.conf
+    at_disabled=$opt_no_schedule
 
     # Check that we got a username and that the user exists
     if [ -z "${username}" ]; then
@@ -516,42 +549,47 @@ main () {
 
     # Check that we got an operation we understand
     if [ ! "$mode" = "restore" ] && [ ! "$mode" = "disable" ]; then
+        if [ -z "$mode" ]; then
+            print_args_help
+            exit
+        fi
+
         print_args_help "Invalid mode \"$mode\". Mode can only be \"restore\" or \"enable\""
     fi
     
     if [ $opt_no_interaction -eq 1 ]; then
         continue=yes    
     else
-        echo "$(red READ AND UNDERSTAND) "
-        echo "This script temporarily disables 2FA authentication for the specified account by:"
-        echo ""
-        echo "1. Creating file: $(italic /etc/ssh/sshd_config.d/tmp_disabled_2fa_for_"$username".conf)"
-        echo "      $(dim "$(italic Match User "$username" Address "$ip_addr")")"
-        echo "         $(dim "$(italic  PasswordAuthentication yes)")"
-        echo "         $(dim "$(italic  AuthenticationMethods password)")"
-        echo "2. Renaming: $(italic /home/"$username"/.google_authenticator)"
-        echo "   To:       $(italic /home/"$username"/.google_authenticator"$(yel _tmp_disabled)")"
-        echo "3. Restarts service SSHD*"
-        echo "4. Restores these changes after $(yel $window) seconds**"
-        echo "5. Restarts service SSHD*"
-        echo
-        echo "* $(italic if the configuration passed validation \(sshd -t\)) "
-        echo "** $(italic or immediately on successful connection from "$username", whatever comes first) "
-        echo
+    cat >&2 <<EOF
+$(red READ AND UNDERSTAND) 
+This script temporarily disables 2FA authentication for the specified account by:
 
-        echo "$(cyan IT SHOULD:) "
-        echo "1. Not effect other users"
-        echo "2. Restore all changes if anything goes wrong"
-        echo "3. Work :)"
-        echo
+1. Creating file: $(italic /etc/ssh/sshd_config.d/tmp_disabled_2fa_for_"$username".conf)
+    $(dim "$(italic Match User "$username" Address "$ip_addr")")
+        $(dim "$(italic  PasswordAuthentication yes)")
+        $(dim "$(italic  AuthenticationMethods password)")
+2. Renaming: $(italic /home/"$username"/.google_authenticator)
+   To:       $(italic /home/"$username"/.google_authenticator"$(yel _tmp_disabled)")
+3. Restarts service SSHD*
+4. Restores these changes after $(yel "$window") seconds**
+5. Restarts service SSHD*
 
-        echo "$(cyan YOU SHOULD:) "
-        echo "1. Not close this terminal before verifying that you can open a new connection"
-        echo "2. Have a plan of what do in the unlikely event that you do get locked out from ssh:ing into this machine"
-        echo "3. Have knowledge of how to manually fix things if anything in the description above did screw things up"
-        echo
-        echo "You can disable this warning by passing option $(italic --ni, -no-interaction)"
-        echo
+* $(italic if the configuration passed validation \(sshd -t\)) 
+** $(italic or immediately on successful connection from "$username", whatever comes first) 
+
+$(cyan IT SHOULD:) 
+1. Not effect other users
+2. Restore all changes if anything goes wrong
+3. Work :)
+
+$(cyan YOU SHOULD:) 
+1. Not close this terminal before verifying that you can open a new connection
+2. Have a plan of what do in the unlikely event that you do get locked out from ssh:ing into this machine
+3. Have knowledge of how to manually fix things if anything in the description above did screw things up
+
+You can disable this warning by passing option $(italic --ni, -no-interaction) or permanently by modifying the script (\$disable_prompt)
+
+EOF
 
         printf "Do you understand and want to continue (y/yes)?: " >&2
         read -r continue
@@ -582,6 +620,5 @@ main () {
 }
 
 main "$@"
-
 
 # last line
