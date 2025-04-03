@@ -21,13 +21,16 @@ sudo ./1fa.sh -a 10.1.2.0/24
 
 # Allow 1FA for user bobby inbound from specific subnet
 sudo ./1fa.sh -bobby -a 10.1.2.0/24
+
+# Allow 1FA for user bobby inbound from any address
+sudo ./1fa.sh -bobby -a '*'
 ```
 
-## Example output
+## Example output of successful execution
 ```
 bobby@secureserver:~$ sudo -E ./1fa.sh -d
 
-$${\color{red}READ AND UNDERSTAND}$$	
+READ AND UNDERSTAND
 This script temporarily disables 2FA authentication for the specified account by:
 
 1. Creating file: /etc/ssh/sshd_config.d/tmp_disabled_2fa_for_bobby.conf
@@ -90,6 +93,23 @@ Deschedule job 411 at Thu Apr  3 10:22:00 2025: OK
 Script exited successfully
 bobby@secureserver:~$
 ```
+## Example output of successful error handling
+```
+bobby@secureserver:~$ sudo ./1fa.sh -d bobby -a "Not a valid address"
+
+Disabling 2fa for user bobby ...
+Scheduling job 415 at Thu Apr  3 10:30:00 2025: OK
+Suffixing  /home/bobby/.google_authenticator: OK
+Creating   /etc/ssh/sshd_config.d/tmp_disabled_2fa_for_bobby.conf: OK
+Validating /etc/ssh/sshd_config: Unsupported Match attribute a
+/etc/ssh/sshd_config.d/tmp_disabled_2fa_for_bobby.conf line 1: Bad Match condition
+255
+Restoring  /home/bobby/.google_authenticator_tmp_disabled: OK
+Restoring  /etc/ssh/sshd_config.d/tmp_disabled_2fa_for_bobby.conf: OK
+bobby@secureserver:~$
+```
+
+The script will also schedule a restoration job using `at` before making any changes, just in case anything unexpected happens during script execution, e.g. server restart.
 
 ## ToDo
 * Automated tests
