@@ -375,7 +375,7 @@ Options:
 Examples:
     $0 -u       # Allow the user who invoked sudo to bypass 2FA when connecting from \$SSH_CLIENT
 
-    $0 -u bobby                 # Allow bobby to bypass 2FA when connecting the current user' ip
+    $0 -u bobby                 # Allow bobby to bypass 2FA when connecting from the current user' ip
     $0 -u bobby -a 10.1.1.4     # Let bobby bypass 2FA from specific IP
     $0 -u bobby -a 10.1.1.0/24  # Let bobby bypass 2FA from specific subnet
     $0 -u bobby -a *            # Let bobby bypass 2FA from any inbound address
@@ -448,6 +448,7 @@ main () {
         case "$1" in
             '-h' | '--help')
                 print_args_help
+                exit
                 ;;
 
             '-d' | '--disable' | '-r' | '--restore')
