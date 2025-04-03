@@ -461,7 +461,7 @@ main () {
                 shift
 
                 # handle optional value (i.e. ./1fa.sh -d -a 192.168.1.54)
-                if [ "$(printf '%c' "$1")" != '-' ]; then
+                if $# -gt 0 && [ "$(printf '%c' "$1")" != '-' ]; then
                     opt_user=$1
                     shift
                 fi
