@@ -26,6 +26,11 @@ sudo ./1fa.sh -bobby -a 10.1.2.0/24
 sudo ./1fa.sh -bobby -a '*'
 ```
 
+## Tested on
+* Debian GNU/Linux 12 (bookworm)
+* Debian GNU/Linux 11 (bullseye)
+* Ubuntu 22.04.5 LTS
+
 ## Example output of successful execution
 ```
 bobby@secureserver:~$ sudo -E ./1fa.sh -d

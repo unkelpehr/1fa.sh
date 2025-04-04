@@ -298,12 +298,18 @@ disable_2fa () {
 #---
 start_countdown () {
     local file=/var/log/auth.log
-    local pattern="^.*logind\[[0-9]+\]: New session [0-9]+ of user ${username}\.$"
     local line_count
     local time_stop
     local time_left
     local prefix="Waiting for $username to connect..."
     local grepRes
+
+    # Debian 11 (bullseye)
+    #   systemd-logind[86]: New session c539 of user bobby.
+    #
+    # Debian 12 (bookworm), Ubuntu 22.04.5 LTS
+    #   systemd-logind[86]: New session 539 of user bobby.
+    local pattern="^.*logind\[[0-9]+\]: New session [a-zA-Z]?[0-9]+ of user ${username}\.$"
 
     line_count="$(wc -l $file | awk '{ print $1}')"
 
