@@ -20,10 +20,10 @@ sudo -E ./1fa.sh
 sudo ./1fa.sh -a 10.1.2.0/24
 
 # Allow 1FA for user bobby inbound from specific subnet
-sudo ./1fa.sh -bobby -a 10.1.2.0/24
+sudo ./1fa.sh -d bobby -a 10.1.2.0/24
 
 # Allow 1FA for user bobby inbound from any address
-sudo ./1fa.sh -bobby -a '*'
+sudo ./1fa.sh -d bobby -a '*'
 ```
 
 ## Tested on
