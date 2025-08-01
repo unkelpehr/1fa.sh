@@ -14,7 +14,7 @@ chmod u+x 1fa.sh
 ```bash
 # Allow 1FA for current user inbound from current SSH client address.
 # Environmental variables must be preserved (-E) for the script to grab the address.
-sudo -E ./1fa.sh
+sudo -E ./1fa.sh -d
 
 # Allow 1FA for current user inbound from specific subnet
 sudo ./1fa.sh -a 10.1.2.0/24
